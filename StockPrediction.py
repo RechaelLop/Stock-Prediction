@@ -1,157 +1,164 @@
-#Import the libraries 
+# ===========================
+# Stock Price Prediction App
+# ===========================
+
+# Import libraries
 import datetime as dt
-import math 
-import pandas_datareader as web 
 import numpy as np
-import pandas as pd 
+import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
-from keras.models import Sequential 
-from keras.layers import Dense, LSTM 
-import matplotlib.pyplot as plt
+from keras.models import Sequential
+from keras.layers import Dense, LSTM
 import streamlit as st
+import yfinance as yf
 
-#To find closing price of particular day 
-def pred(symbol):
-    current_d=st.sidebar.date_input("Enter Date to view close price:")
-    st.write('Close price of the entered date:') 
-    ds = symbol 
-    apple_quote2 = web.DataReader(ds, data_source='yahoo', start=current_d, end=current_d)
-    st.write(apple_quote2['Close'])
+# ---------------------------
+# Constants
+# ---------------------------
+TODAY = dt.date.today()  # current date
 
-#prediction Function 
-def prediction(symbol, start, end):
-    ds = symbol 
-    start_d = start 
-    end_d = end 
-    
-    @st.cache_data
-    def get_stock_data(symbol, start, end):
-        return web.DataReader(symbol, data_source='yahoo', start=start, end=end)
+# ===========================
+# Function: Fetch historical data
+# ===========================
+@st.cache_data
+def get_stock_data(symbol: str, start: dt.date, end: dt.date) -> pd.DataFrame:
+    """
+    Fetch historical stock data from Yahoo Finance.
+    End date is clamped to today if necessary.
+    Returns a DataFrame or None if no data is found.
+    """
+    if start >= end:
+        st.error("❌ Start date must be before end date.")
+        return None
+    if end > TODAY:
+        end = TODAY  # cannot fetch future data
 
+    try:
+        data = yf.download(symbol, start=start, end=end + dt.timedelta(days=1), progress=False)
+        if data.empty:
+            st.error("⚠️ No data available for this symbol/date range.")
+            return None
+        return data
+    except Exception as e:
+        st.error(f"❌ Failed to fetch data: {e}")
+        return None
+
+# ===========================
+# Function: View closing price for a specific date
+# ===========================
+def view_close_price(symbol: str):
+    """Displays the closing price for a selected historical date."""
+    date = st.sidebar.date_input("Enter date to view close price (historical):")
+    df = yf.download(symbol, start=date, end=date + dt.timedelta(days=1), progress=False)
+
+    if df.empty:
+        st.warning("⚠️ No data available for this date.")
+    else:
+        # Safely get first row
+        close_price = df['Close'].iloc[0]
+        st.write(f"Close price of {symbol} on {date}: ${close_price:.2f}")
+
+# ===========================
+# Function: Train LSTM and predict future price
+# ===========================
+def predict_stock(symbol: str, start: dt.date, end: dt.date, future_date: dt.date):
+    """
+    Shows historical data and predicts future stock price using LSTM.
+    Handles any historical range, and predicts for any future date.
+    """
     df = get_stock_data(symbol, start, end)
+    if df is None:
+        return
 
-    #Show teh data
-    tail_s = df.tail(10)
-    st.table(tail_s)
-    #shape
-    #Visualize the closing price history
-    chart_data = pd.DataFrame(
-    df, columns=['Close'])
-    st.line_chart(chart_data)
+    # ---------------------------
+    # Historical data visualization
+    # ---------------------------
+    st.subheader("📊 Historical Stock Data")
+    st.dataframe(df)
+    st.subheader("📈 Closing Price History")
+    st.line_chart(df["Close"])
 
-    #Create a new dataframe with only the 'Close column
-    data = df.filter(['Close'])
-    #Convert the dataframe to a numpy array
+    # ---------------------------
+    # Prepare data for LSTM
+    # ---------------------------
+    if "Close" not in df.columns:
+        st.error("⚠️ 'Close' column not found in fetched data. Check stock symbol.")
+        return
+
+    data = df[["Close"]]
     dataset = data.values
-    #Get the number of rows to train the model on
-    training_data_len = math.ceil( len(dataset) * .8 )
-    #Scale the data 
-    scaler = MinMaxScaler(feature_range=(0,1))
-    scaled_data = scaler.fit_transform(dataset)
-    #Create the training data set 
-    # #Create the scaled training data set 
-    train_data = scaled_data[0:training_data_len , :]
-    #Split the data into x_train and y_train data sets 
-    x_train = [] 
-    y_train = []
-    for i in range(60, len(train_data)):
-        x_train.append(train_data[i-60:i, 0])
-        y_train.append(train_data[i,0])
-    #Convert the x_train and y_train to numpy arrays
+
+    lookback = min(60, len(dataset))  # last 60 days or less if insufficient data
+    scaled_data = MinMaxScaler(feature_range=(0, 1)).fit_transform(dataset)
+
+    # Create sequences for LSTM training
+    x_train, y_train = [], []
+    for i in range(lookback, len(scaled_data)):
+        x_train.append(scaled_data[i - lookback:i, 0])
+        y_train.append(scaled_data[i, 0])
+
+    # Handle very short datasets
+    if len(x_train) == 0:
+        x_train.append(scaled_data[-lookback:])
+        y_train.append(scaled_data[-1, 0])
+
     x_train, y_train = np.array(x_train), np.array(y_train)
-    #Reshape the data 
-    x_train = np.reshape(x_train, (x_train.shape[0], x_train.shape[1], 1)) 
-    x_train.shape
-    #Build the LSTM model 
-    model = Sequential() 
-    model.add(LSTM(50, return_sequences=True, input_shape= (x_train.shape[1], 1)))
-    model.add(LSTM(50, return_sequences= False)) 
+    x_train = np.reshape(x_train, (x_train.shape[0], x_train.shape[1], 1))
+
+    # ---------------------------
+    # Build LSTM model
+    # ---------------------------
+    model = Sequential()
+    model.add(LSTM(50, return_sequences=True, input_shape=(x_train.shape[1], 1)))
+    model.add(LSTM(50, return_sequences=False))
     model.add(Dense(25))
     model.add(Dense(1))
-    #Compile the model 
-    model.compile(optimizer='adam', loss='mean_squared_error')
+    model.compile(optimizer="adam", loss="mean_squared_error")
 
-    #Train the model 
-    model.fit(x_train, y_train, batch_size=1, epochs=1)
-    #Create the testing dataset
-    #Create the new array containing scaled values from index 1802 to 2003
-    test_data = scaled_data[training_data_len:, :]
-    #Create the data sets x_test and y_test 
-    x_test = [] 
-    y_test = dataset[training_data_len:, :] 
-    for i in range(60, len(test_data)):
-        x_test.append(test_data[i-60:i, 0])
-        #Convert the data to a numpy array
-    x_test = np.array(x_test)
-    #Reshape the data
-    x_test = np.reshape(x_test, (x_test.shape[0], x_test.shape[1], 1 ))
-    #Get the models prdicted price values 
-    predictions = model.predict(x_test) 
-    predictions = scaler.inverse_transform(predictions)
-    #Get the root mean squarred error (RMSE) 
-    rmse = np.sqrt(np.mean((predictions - y_test) ** 2))
-    st.write(f"Root Mean Squared Error (RMSE): {rmse:.4f}")
-    #Plot the data
-    train = data[:training_data_len] 
-    valid = data[training_data_len:]
-    valid['Predictions'] = predictions
-    #Visualize the data plt.figure(figsize=(16,8))
-    plt.title('Model')
-    plt.xlabel('Date', fontsize=18) 
-    plt.ylabel('Close Price USD ($)', fontsize=18) 
-    plt.plot(train['Close'])
-    plt.plot(valid[['Close', 'Predictions']])
-    plt.legend(['Train','Val','Predictions'], loc= 'lower right')
-    plt.show() 
-    predict_chart_data = pd.DataFrame(valid, columns=['Close', 'Predictions'])
-    st.line_chart(predict_chart_data)
+    # Train model
+    with st.spinner("⏳ Training model..."):
+        model.fit(x_train, y_train, batch_size=1, epochs=1, verbose=0)
 
-    #Show the valid and predicted prics
-    st.write('Close Price and Predicted Close ')
-    st.write(valid)
-    #Get the quote to find the predicted CLOSE price
-    p_end = st.sidebar.date_input("Enter Date to find the predicted Close:", dt.date(2022, 1,16)) 
-    apple_quote = web.DataReader(symbol, data_source='yahoo',start=start_d, end=p_end)
-    #Create a new dataframe 
-    new_df = apple_quote.filter(['Close'])
-    #Get teh last 60 daysclosing price values and convert the dataframe to an array
-    last_60_days = new_df[-60:].values
-    #Scale the data to be values between 0 and 1
-    last_60_days_scaled = scaler.transform(last_60_days)
-    #Create an empty list
-    X_test = []
-    #Append teh past 60 days
-    X_test.append(last_60_days_scaled)
-    #Convert the X_test data set to a numpy array
-    X_test = np.array(X_test)
-    #Reshape the data
-    X_test = np.reshape(X_test, (X_test.shape[0], X_test.shape[1], 1))
-    #Get the predicted scaled price
-    pred_price = model.predict(X_test)
-    #undo the scaling 
-    pred_price = scaler.inverse_transform(pred_price)
-    labels = ['predicted price'] 
-    pred_price = pd.DataFrame(pred_price, columns=labels)
-    st.write("Predicted price for",p_end,":",pred_price)
+    # ---------------------------
+    # Predict future price
+    # ---------------------------
+    st.subheader(f"🔮 Predicted Close Price for {future_date}")
 
-    #working of streamlit code
-    symbol = st.sidebar.text_input("Enter Stock Symbol:", value="AAPL") 
-    start = st.sidebar.date_input("Enter Start Date:", dt.date(2020, 3, 4)) 
-    end = st.sidebar.date_input("Enter End:", dt.date(2021, 5, 6))
+    # Use last 'lookback' days from historical data for prediction
+    last_days = dataset[-lookback:]
+    scaler_last = MinMaxScaler(feature_range=(0, 1))
+    last_scaled = scaler_last.fit_transform(last_days)
 
-    if start >= end:
-        st.error("Start date must be before the end date.")
-        st.stop()
+    X_future = np.array([last_scaled])
+    X_future = np.reshape(X_future, (X_future.shape[0], X_future.shape[1], 1))
+    pred_scaled = model.predict(X_future)
+    pred_price = scaler_last.inverse_transform(pred_scaled)
 
-    #Main screen 
-    if symbol == '': 
-        st.write("Select Stock") 
-    else:
-        st.write(""" # Prediction for """, symbol) 
-    #Function for Prediction 
-    if start == start_again and end == end_again: 
-        print('repeated')
-    else:
-        start_again = start 
-        end_again = end 
-    prediction(symbol, start, end)
+    st.write(f"${pred_price[0][0]:.2f}")
+
+# ===========================
+# Streamlit UI
+# ===========================
+st.title("📈 Stock Price Prediction App")
+
+# Sidebar inputs
+symbol = st.sidebar.text_input("Enter Stock Symbol:", value="AAPL")
+
+# Historical data picker (up to today)
+start = st.sidebar.date_input("Enter Start Date (historical):", dt.date(2020, 3, 4), max_value=TODAY)
+end = st.sidebar.date_input("Enter End Date (historical):", dt.date.today(), min_value=start, max_value=TODAY)
+
+# Future prediction date picker (can select any date after today, e.g., up to 2027)
+future_date = st.sidebar.date_input(
+    "Enter future date for prediction:",
+    value=TODAY + dt.timedelta(days=1),
+    min_value=TODAY + dt.timedelta(days=1),
+    max_value=dt.date(2027, 12, 31)
+)
+
+# Sidebar buttons
+if st.sidebar.button("Predict Future Price & Show Historical"):
+    predict_stock(symbol, start, end, future_date)
+
+if st.sidebar.button("View Close Price for Specific Date"):
+    view_close_price(symbol)
